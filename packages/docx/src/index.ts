@@ -7,6 +7,11 @@ export {
 } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
+export type {
+  DocxSourceRangeHighlight,
+  DocxSourceRangeHighlightResolution,
+  DocxSourceTextPosition,
+} from './source-range-highlight';
 export type { DocxCommentsOptions } from './comment-margin';
 export type {
   ViewerCommentConnectorOptions,

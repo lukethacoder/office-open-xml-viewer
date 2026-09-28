@@ -34,6 +34,10 @@ import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 export interface DocxHighlightMatch {
   slices: MatchRunSlice[];
   active: boolean;
+  color?: string;
+  label?: string;
+  onActivate?: () => void;
+  characterBounds?: boolean;
 }
 
 /** Default highlight colours (browser find-bar palette): a soft yellow for
@@ -79,8 +83,8 @@ export function buildDocxHighlightLayer(
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
   for (const match of matches) {
-    const fill = match.active ? activeColor : matchColor;
-    for (const slice of match.slices) {
+    const fill = match.color ?? (match.active ? activeColor : matchColor);
+    for (const [sliceIndex, slice] of match.slices.entries()) {
       const run = runs[slice.runIndex];
       if (!run) continue;
       const measure = measureForFont(run.font);
@@ -100,10 +104,19 @@ export function buildDocxHighlightLayer(
       // §17.3.2.10 縦中横 alone compresses natural extents into the retained
       // one-em cell. Ordinary runs preserve the established natural measurement.
       const k = tateChuYokoOverlayScale(run, measure);
-      const x = pitchedX * k;
-      const width = pitchedWidth * k;
+      const bounds = match.characterBounds ? run.highlightBounds : undefined;
+      const horizontalScale = bounds && run.w > 0 ? bounds.width / run.w : 1;
+      const x = pitchedX * k * horizontalScale;
+      const width = pitchedWidth * k * horizontalScale;
       if (width <= 0) continue;
-      const box = document.createElement('div');
+      const interactive = sliceIndex === 0 ? match.onActivate : undefined;
+      const box = document.createElement(interactive ? 'button' : 'div');
+      if (interactive) {
+        const button = box as HTMLButtonElement;
+        button.type = 'button';
+        button.setAttribute('aria-label', match.label?.trim() || 'highlight');
+        button.addEventListener('click', interactive);
+      }
       // A vertical (tbRl) page reports the run at its physical top-left and
       // carries a rotate transform; apply the same transform (about the box's
       // top-left) so the highlight lies along the rotated glyph run, exactly as
@@ -117,10 +130,13 @@ export function buildDocxHighlightLayer(
       // column exactly as before at 1× scale.
       box.style.cssText =
         `position:absolute;` +
-        `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
+        `left:${overlayPercent((bounds?.x ?? run.x) + x, cssWidth)};` +
+        `top:${overlayPercent(bounds?.y ?? run.y, cssHeight)};` +
+        `width:${overlayPercent(width, cssWidth)};` +
+        `height:${overlayPercent(bounds?.height ?? run.h, cssHeight)};` +
         transform +
-        `background:${fill};pointer-events:none;`;
+        `background:${fill};border:0;padding:0;` +
+        `pointer-events:${interactive ? 'auto' : 'none'};`;
       layer.appendChild(box);
     }
   }

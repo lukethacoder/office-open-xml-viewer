@@ -40,6 +40,12 @@ import type { DocxScrollSlot as PageSlot } from './scroll-slot';
 import { buildDocxTextLayer } from './text-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { buildDocxHighlightLayer } from './find-highlight-layer';
+import {
+  projectDocxSourceRangeHighlights,
+  type DocxSourceRangeHighlight,
+  type DocxSourceRangeHighlightResolution,
+  type DocxSourceRangePageMatch,
+} from './source-range-highlight.js';
 import type { RenderPageOptions } from './types';
 import {
   createDocxCommentSelectionContext,
@@ -170,6 +176,8 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._layout.apply({
         pageCount: this._doc!.pageCount, exact: true, complete: this._doc!.layoutComplete,
       });
+      void this._resolveSourceRangeHighlights().catch((error: unknown) =>
+        this._reportRenderError(error));
     },
     relayout: () => this.relayout(),
     invalidateRender: () => { this._renderEpoch++; },
@@ -186,7 +194,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     token: () => 0,
     nextToken: () => 0,
     wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) ||
-      this._findActive || !!slot.commentTintLayer,
+      this._findActive || this._sourceRangeHighlights.length > 0 || !!slot.commentTintLayer,
     reportError: (error) => this._reportRenderError(error),
   } satisfies Pick<BitmapSlotHooks<PageSlot, DocxTextRunInfo>,
     'slots' | 'epoch' | 'scale' | 'slotIndex' | 'token' | 'nextToken' | 'wantRuns' | 'reportError'>;
@@ -366,6 +374,10 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._findRequestGeneration++;
       this._find.invalidate();
       this._findActive = false;
+      this._sourceRangeHighlightGeneration++;
+      this._sourceRangeHighlights = [];
+      this._sourceRangeHighlightPages = new Map();
+      this._sourceRangeHighlightRuns = new Map();
       this._activeCommentId = null;
       this._activeCommentPage = null;
       this._commentNavigation.reset();
@@ -496,13 +508,32 @@ export class DocxScrollViewer implements ZoomableViewer {
     (page) => this._collectPageRuns(page),
   );
   private _findActive = false;
+  private _sourceRangeHighlights: readonly Readonly<DocxSourceRangeHighlight>[] = [];
+  private _sourceRangeHighlightPages: ReadonlyMap<number, readonly DocxSourceRangePageMatch[]> = new Map();
+  private _sourceRangeHighlightRuns: ReadonlyMap<number, readonly Readonly<DocxTextRunInfo>[]> = new Map();
+  private _sourceRangeHighlightGeneration = 0;
   private readonly _highlights = new HighlightLayerController<PageSlot, DocxTextRunInfo, DocxMatchLocation>({
     slots: () => this._slots,
-    active: () => this._findActive,
-    runs: (unit) => this._find.pageRuns(unit),
-    setRuns: (unit, runs) => this._find.setPageRuns(unit, runs),
+    active: () => this._findActive || this._sourceRangeHighlights.length > 0,
+    runs: (unit) => this._find.pageRuns(unit) ?? this._sourceRangeHighlightRuns.get(unit),
+    setRuns: (unit, runs) => {
+      this._find.setPageRuns(unit, runs);
+      if (this._sourceRangeHighlights.length > 0) {
+        this._sourceRangeHighlightRuns = new Map(this._sourceRangeHighlightRuns).set(unit, runs);
+      }
+    },
     paint: (unit, slot, runs, measure) => buildDocxHighlightLayer(
-      slot.highlightLayer, runs, this._find.pageHighlights(unit),
+      slot.highlightLayer,
+      runs,
+      [
+        ...(this._findActive ? this._find.pageHighlights(unit) : []),
+        ...(this._sourceRangeHighlightPages.get(unit) ?? []).map((match) => ({
+          ...match,
+          active: false,
+          characterBounds: true,
+          onActivate: match.onActivate ? () => match.onActivate?.(match.id) : undefined,
+        })),
+      ],
       this._pageWidthPx(unit), this._pageHeightPx(unit),
       measure, this._opts.findHighlightColors,
     ),
@@ -1118,6 +1149,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       exact: true,
       complete: doc?.layoutComplete !== false,
     });
+    await this._resolveSourceRangeHighlights();
   }
 
   scrollToPage(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
@@ -1186,6 +1218,51 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._findActive = false;
     this._find.invalidate();
     this._highlights.redrawAll();
+  }
+
+  /** Replaces application-owned source range highlights and reports unresolved targets. */
+  async setSourceRangeHighlights(
+    highlights: readonly Readonly<DocxSourceRangeHighlight>[],
+  ): Promise<readonly DocxSourceRangeHighlightResolution[]> {
+    this._sourceRangeHighlights = Object.freeze([...highlights]);
+    return this._resolveSourceRangeHighlights();
+  }
+
+  /** Resolves all source ranges against current pagination and refreshes mounted overlays. */
+  private async _resolveSourceRangeHighlights(): Promise<readonly DocxSourceRangeHighlightResolution[]> {
+    const generation = ++this._sourceRangeHighlightGeneration;
+    const doc = this._doc;
+    const layoutViewGeneration = this._layoutViewGeneration;
+    if (!doc || this._sourceRangeHighlights.length === 0) {
+      this._sourceRangeHighlightPages = new Map();
+      this._sourceRangeHighlightRuns = new Map();
+      this._highlights.redrawAll();
+      return [];
+    }
+    const highlights = this._sourceRangeHighlights;
+    const pages: { page: number; runs: DocxTextRunInfo[] }[] = [];
+    try {
+      if (!doc.layoutComplete) await doc.waitUntilLayoutComplete();
+      for (let page = 0; page < doc.pageCount; page++) {
+        pages.push({ page, runs: await this._collectPageRuns(page) });
+      }
+    } catch (error) {
+      if (this._destroyed || this._doc !== doc ||
+        generation !== this._sourceRangeHighlightGeneration) return [];
+      throw error;
+    }
+    if (this._destroyed || this._doc !== doc) return [];
+    const projection = projectDocxSourceRangeHighlights(pages, highlights);
+    if (layoutViewGeneration !== this._layoutViewGeneration ||
+      generation !== this._sourceRangeHighlightGeneration) {
+      return projection.resolutions;
+    }
+    this._sourceRangeHighlightPages = projection.pages;
+    this._sourceRangeHighlightRuns = new Map(
+      pages.filter(({ page }) => projection.pages.has(page)).map(({ page, runs }) => [page, runs]),
+    );
+    this._highlights.redrawAll();
+    return projection.resolutions;
   }
 
   private async _collectPageRuns(page: number): Promise<DocxTextRunInfo[]> {
@@ -1350,6 +1427,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._pendingLoadAbort = null;
     this._pendingViewChanged = null;
     this._findRequestGeneration++;
+    this._sourceRangeHighlightGeneration++;
     this._errorRouter.close();
     this._layout.unbind();
     this._layoutViewGeneration++;

@@ -2260,6 +2260,161 @@ describe('DocxScrollViewer — full-document find', () => {
   });
 });
 
+describe('DocxScrollViewer — source range highlights', () => {
+  it('renders exact source ranges and restores them after virtualized remount', async () => {
+    installDom();
+    const container = makeContainer(200, 120);
+    const engine = new FakeDocxEngine(
+      4,
+      Array.from({ length: 4 }, () => ({ widthPt: 100, heightPt: 200 })),
+    );
+    const run = {
+      source: { story: 'body' as const, storyInstance: 'body', path: [0] },
+      paragraphId: 'A0000001',
+      sourceRunIndex: 0,
+      text: 'alpha bravo charlie delta',
+      x: 4,
+      y: 6,
+      w: 120,
+      h: 12,
+      fontSize: 12,
+      font: '12px serif',
+    };
+    engine.feedTextRuns = [run];
+    engine.collectPageRuns = (page) => Promise.resolve(page === 0 ? [run] : []);
+    const viewer = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 0,
+      overscan: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = container.children[0].children[0] as FakeEl;
+    scrollHost.clientHeight = 120;
+    viewer.relayout();
+
+    await expect(viewer.setSourceRangeHighlights([{
+      id: 'review-range',
+      start: {
+        paragraphId: 'A0000001',
+        offset: 6,
+      },
+      end: {
+        paragraphId: 'A0000001',
+        offset: 19,
+      },
+      exact: 'bravo charlie',
+      color: 'rgba(1, 2, 3, 0.4)',
+    }])).resolves.toEqual([{ id: 'review-range', status: 'resolved' }]);
+
+    const mountedHighlight = (): FakeEl | undefined => scrollHost.children
+      .filter((child) => child.children.some((nested) => nested.tag === 'canvas'))
+      .flatMap((slot) => slot.children)
+      .find((layer) => layer.children.some((box) => box.style.background === 'rgba(1, 2, 3, 0.4)'));
+    expect(mountedHighlight()).toBeDefined();
+
+    viewer.scrollToPage(3);
+    expect(mountedHighlight()).toBeUndefined();
+    viewer.scrollToPage(0);
+    await vi.waitFor(() => expect(mountedHighlight()).toBeDefined());
+    viewer.destroy();
+  });
+
+  it('reports missing endpoints and exact-text mismatches independently', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    engine.feedTextRuns = [{
+      source: { story: 'body', storyInstance: 'body', path: [0] },
+      paragraphId: 'A0000001',
+      sourceRunIndex: 0,
+      text: 'alpha bravo',
+      x: 4,
+      y: 6,
+      w: 60,
+      h: 12,
+      fontSize: 12,
+      font: '12px serif',
+    }];
+    const viewer = makeBorrowedDocxScrollViewer(
+      makeContainer(200, 120) as unknown as HTMLElement,
+      { document: engine.asDoc() },
+    );
+    await expect(viewer.setSourceRangeHighlights([
+      {
+        id: 'missing',
+        start: { paragraphId: 'A0000002', offset: 0 },
+        end: { paragraphId: 'A0000002', offset: 1 },
+        exact: 'x',
+      },
+      {
+        id: 'mismatch',
+        start: { paragraphId: 'A0000001', offset: 0 },
+        end: { paragraphId: 'A0000001', offset: 5 },
+        exact: 'wrong',
+      },
+      {
+        id: 'reversed',
+        start: { paragraphId: 'A0000001', offset: 5 },
+        end: { paragraphId: 'A0000001', offset: 2 },
+        exact: '',
+      },
+    ])).resolves.toEqual([
+      { id: 'missing', status: 'unresolved', reason: 'source-not-found' },
+      { id: 'mismatch', status: 'unresolved', reason: 'text-mismatch' },
+      { id: 'reversed', status: 'unresolved', reason: 'text-mismatch' },
+    ]);
+    viewer.destroy();
+  });
+
+  it('resolves multi-page body ranges without including repeated page stories', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(2, [
+      { widthPt: 100, heightPt: 200 },
+      { widthPt: 100, heightPt: 200 },
+    ]);
+    const textRun = (
+      story: 'body' | 'header' | 'footer',
+      path: number[],
+      paragraphId: string,
+      text: string,
+    ) => ({
+      source: { story, storyInstance: story, path },
+      paragraphId,
+      sourceRunIndex: 0,
+      text,
+      x: 4,
+      y: 6,
+      w: 60,
+      h: 12,
+      fontSize: 12,
+      font: '12px serif',
+    });
+    engine.collectPageRuns = (page) => Promise.resolve(page === 0
+      ? [textRun('body', [0], 'A0000001', 'first'), textRun('footer', [0], 'F0000001', 'footer')]
+      : [textRun('header', [0], 'H0000001', 'header'), textRun('body', [1], 'A0000002', 'second')]);
+    const viewer = makeBorrowedDocxScrollViewer(
+      makeContainer(200, 120) as unknown as HTMLElement,
+      { document: engine.asDoc() },
+    );
+
+    await expect(viewer.setSourceRangeHighlights([{
+      id: 'multi-page',
+      start: {
+        paragraphId: 'A0000001',
+        offset: 0,
+      },
+      end: {
+        paragraphId: 'A0000002',
+        offset: 6,
+      },
+      exact: 'firstsecond',
+    }])).resolves.toEqual([{ id: 'multi-page', status: 'resolved' }]);
+    viewer.destroy();
+  });
+});
+
 describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
   const PT_TO_PX = 4 / 3;
   // container fit width 200, page widthPt 100 → base scale = 200/(100*PT_TO_PX)=1.5.

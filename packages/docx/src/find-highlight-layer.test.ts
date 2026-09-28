@@ -18,7 +18,12 @@ interface FakeEl {
   innerHTML: string;
   style: Record<string, string> & { cssText: string };
   children: FakeEl[];
+  attributes: Record<string, string>;
+  listeners: Record<string, EventListener>;
+  type?: string;
   appendChild(c: FakeEl): void;
+  setAttribute(name: string, value: string): void;
+  addEventListener(name: string, listener: EventListener): void;
 }
 
 function makeEl(tag: string): FakeEl {
@@ -27,6 +32,8 @@ function makeEl(tag: string): FakeEl {
     tag,
     innerHTML: '',
     children: [],
+    attributes: {},
+    listeners: {},
     style: new Proxy(style as Record<string, string> & { cssText: string }, {
       set(target, prop: string, value: string) {
         if (prop === 'cssText') {
@@ -43,6 +50,12 @@ function makeEl(tag: string): FakeEl {
     }),
     appendChild(c: FakeEl) {
       this.children.push(c);
+    },
+    setAttribute(name: string, value: string) {
+      this.attributes[name] = value;
+    },
+    addEventListener(name: string, listener: EventListener) {
+      this.listeners[name] = listener;
     },
   };
   return el;
@@ -62,7 +75,13 @@ describe('buildDocxHighlightLayer', () => {
   it('draws one box per slice, positioned from run x/y + measured extent', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
-    const runs = [run({ text: 'the quick', x: 100, y: 50, h: 16 })];
+    const runs = [run({
+      text: 'the quick',
+      x: 100,
+      y: 50,
+      h: 16,
+      highlightBounds: { x: 100, y: 53, width: 63, height: 9 },
+    })];
     // Match "quick" = slice [4, 9).
     const matches: DocxHighlightMatch[] = [
       { slices: [{ runIndex: 0, start: 4, end: 9 }], active: false },
@@ -101,6 +120,79 @@ describe('buildDocxHighlightLayer', () => {
     ];
     buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 1, 1, measureForFont);
     expect(layer.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
+  });
+
+  it('uses character bounds for application-owned highlights', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({
+      text: 'abc',
+      x: 10,
+      y: 20,
+      w: 21,
+      h: 16,
+      highlightBounds: { x: 10, y: 23, width: 21, height: 9 },
+    })];
+    const matches: DocxHighlightMatch[] = [{
+      slices: [{ runIndex: 0, start: 0, end: 3 }],
+      active: false,
+      color: 'red',
+      characterBounds: true,
+    }];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    expect(layer.children[0].style.top).toBe('23%');
+    expect(layer.children[0].style.width).toBe('21%');
+    expect(layer.children[0].style.height).toBe('9%');
+  });
+
+  it('makes application-owned highlights keyboard-focusable and activatable', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const activate = vi.fn();
+    const matches: DocxHighlightMatch[] = [{
+      slices: [
+        { runIndex: 0, start: 0, end: 1 },
+        { runIndex: 1, start: 0, end: 1 },
+      ],
+      active: false,
+      label: 'Review range',
+      onActivate: activate,
+    }];
+    buildDocxHighlightLayer(
+      layer as unknown as HTMLDivElement,
+      [run({ text: 'a' }), run({ text: 'b', x: 7 })],
+      matches,
+      100,
+      100,
+      measureForFont,
+    );
+    expect(layer.children[0]).toMatchObject({
+      tag: 'button',
+      type: 'button',
+      attributes: { 'aria-label': 'Review range' },
+    });
+    expect(layer.children[1].tag).toBe('div');
+    expect(layer.children[1].style['pointer-events']).toBe('none');
+    layer.children[0].listeners.click?.(new Event('click'));
+    expect(activate).toHaveBeenCalledOnce();
+  });
+
+  it('provides a fallback name for interactive highlights without labels', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    buildDocxHighlightLayer(
+      layer as unknown as HTMLDivElement,
+      [run({ text: 'a' })],
+      [{
+        slices: [{ runIndex: 0, start: 0, end: 1 }],
+        active: false,
+        onActivate: vi.fn(),
+      }],
+      100,
+      100,
+      measureForFont,
+    );
+    expect(layer.children[0].attributes['aria-label']).toBe('highlight');
   });
 
   it('draws a box per run for a cross-run match', () => {

@@ -1301,6 +1301,10 @@ export type DocxHighlightColors = FindHighlightColors;
 export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
+    color?: string;
+    label?: string;
+    onActivate?: () => void;
+    characterBounds?: boolean;
 }
 export interface DocxMatchLocation {
     page: number;
@@ -1343,6 +1347,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
+    setSourceRangeHighlights(highlights: readonly Readonly<DocxSourceRangeHighlight>[]): Promise<readonly DocxSourceRangeHighlightResolution[]>;
     get topVisiblePage(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
@@ -1389,6 +1394,27 @@ export interface DocxSelectionSourceLocator {
     readonly story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
     readonly storyInstance: string;
     readonly path: readonly number[];
+}
+export interface DocxSourceRangeHighlight {
+    readonly id: string;
+    readonly start: Readonly<DocxSourceTextPosition>;
+    readonly end: Readonly<DocxSourceTextPosition>;
+    readonly exact: string;
+    readonly color?: string;
+    readonly label?: string;
+    readonly onActivate?: (id: string) => void;
+}
+export type DocxSourceRangeHighlightResolution = {
+    readonly id: string;
+    readonly status: 'resolved';
+} | {
+    readonly id: string;
+    readonly status: 'unresolved';
+    readonly reason: 'source-not-found' | 'text-mismatch';
+};
+export interface DocxSourceTextPosition {
+    readonly paragraphId: string;
+    readonly offset: number;
 }
 export interface DocxStorySource {
     story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
